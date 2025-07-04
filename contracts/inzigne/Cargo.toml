@@ -1,0 +1,16 @@
+[package]
+name = "inzigne"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[dependencies]
+soroban-env-common = "22.1.4"
+soroban-sdk = { version = "22.0.8", features = ["alloc"], workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
