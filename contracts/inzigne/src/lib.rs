@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, BytesN, Env, IntoVal, Map, Symbol,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Map, Symbol, Val,
 };
 
 // --- Estructura de Datos para el Depósito ---
@@ -54,23 +54,30 @@ impl SecureEscrow {
     }
 
     fn generate_deposit_id(
-        env: Env,
+        env: &Env, // Es buena práctica pasar el Env como referencia
         caller: Address,
         beneficiary: Address,
         token: Address,
         amount: i128,
         nonce: BytesN<32>,
     ) -> BytesN<32> {
-        let data = (
+        // Paso 1: Convertir la tupla de datos a un 'Val' genérico.
+        // Esto agrupa todos los datos en un solo tipo de Soroban.
+        let data_val: Val = (
             caller.clone(),
             beneficiary.clone(),
             token.clone(),
             amount,
             nonce.clone(),
         )
-            .into_val(&env); // Aquí sí usamos &env para into_val
+            .into_val(env);
 
-        env.crypto().sha256(&data).into()
+        // Paso 2 (LA SOLUCIÓN): Serializar explícitamente el 'Val' a 'Bytes' usando XDR.
+        // La función de hash necesita una secuencia de bytes concreta, no un tipo abstracto.
+        let data_bytes: Bytes = data_val.to_xdr(env);
+
+        // Paso 3: Ahora sí, podemos hashear el objeto 'Bytes' resultante.
+        env.crypto().sha256(&data_bytes).into()
     }
 
     /// --- DEPÓSITO ---
@@ -91,7 +98,7 @@ impl SecureEscrow {
             panic_with_error!(&env, Error::InvalidBeneficiary);
         }
 
-        let deposit_id = generate_deposit_id(
+        let deposit_id = Self::generate_deposit_id(
             &env,
             caller.clone(),
             beneficiary.clone(),
@@ -127,13 +134,13 @@ impl SecureEscrow {
         // CORRECCIÓN 2: La función `transfer` en esta versión del SDK espera `MuxedAddress`.
         // Se debe realizar la conversión de `Address` a `MuxedAddress` con `.into()`.
         token_client.transfer(
-            &depositor.clone().into(),
+            &caller.clone().into(),
             &contract_address.clone().into(),
             &amount,
         );
 
         env.events().publish(
-            (symbol_short!("deposit"), depositor, beneficiary),
+            (symbol_short!("deposit"), caller, beneficiary),
             (deposit_id, amount),
         );
     }
