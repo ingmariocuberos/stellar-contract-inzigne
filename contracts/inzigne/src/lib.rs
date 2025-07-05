@@ -1,40 +1,40 @@
+#![no_std]
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, BytesN, Env, Symbol, Vec,
+    Address, BytesN, Env, IntoVal, Map, Symbol,
 };
 
-use soroban_env_common::env::Env;
-
-// --- ESTRUCTURA DE DATOS PARA LOS DEPÓSITOS ---
-// Es una buena práctica definir una estructura para los datos complejos.
+// --- Estructura de Datos para el Depósito ---
+// Almacena la información clave de cada fideicomiso.
 #[contracttype]
 #[derive(Clone)]
 pub struct Deposit {
     pub depositor: Address,
     pub beneficiary: Address,
-    pub token: Address, // Token del depósito (ej. XLM o USDC)
+    pub token: Address,
     pub amount: i128,
     pub released: bool,
 }
 
-// --- ERRORES PERSONALIZADOS ---
-// CORRECCIÓN: Usar errores de contrato en lugar de panics con unwrap().
+// --- Errores Personalizados del Contrato ---
+// Define los posibles errores que el contrato puede devolver.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
-    Unauthorized = 3,
-    InvalidAmount = 4,
-    InvalidBeneficiary = 5,
-    DepositExists = 6,
-    DepositNotFound = 7,
-    AlreadyReleased = 8,
+    AlreadyInitialized = 1, // El contrato ya fue inicializado.
+    NotInitialized = 2,     // El contrato no ha sido inicializado.
+    Unauthorized = 3,       // La acción no está autorizada.
+    InvalidAmount = 4,      // El monto debe ser mayor que cero.
+    InvalidBeneficiary = 5, // El beneficiario no puede ser el mismo que el depositante.
+    DepositExists = 6,      // Ya existe un depósito con los mismos parámetros.
+    DepositNotFound = 7,    // El depósito especificado no se encontró.
+    AlreadyReleased = 8,    // Los fondos del depósito ya fueron liberados o reembolsados.
 }
 
-// --- LLAVES PARA EL ALMACENAMIENTO ---
-// CORRECCIÓN: Usar constantes para las llaves es más eficiente y seguro.
+// --- Claves para el Almacenamiento ---
+// Símbolos cortos y eficientes para acceder a los datos en el storage.
 const OWNER: Symbol = symbol_short!("owner");
 const DEPOSITS: Symbol = symbol_short!("deposits");
 
@@ -43,59 +43,75 @@ pub struct SecureEscrow;
 
 #[contractimpl]
 impl SecureEscrow {
-    /// Inicializa el contrato estableciendo el owner. Solo se puede llamar una vez.
+    /// --- INICIALIZACIÓN ---
+    /// Inicializa el contrato estableciendo un propietario.
+    /// Solo se puede llamar una vez.
     pub fn initialize(env: Env, owner: Address) {
-        // CORRECCIÓN: Evitar que el contrato se reinicialice.
         if env.storage().instance().has(&OWNER) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
         env.storage().instance().set(&OWNER, &owner);
     }
 
+    fn generate_deposit_id(
+        env: Env,
+        caller: Address,
+        beneficiary: Address,
+        token: Address,
+        amount: i128,
+        nonce: BytesN<32>,
+    ) -> BytesN<32> {
+        let data = (
+            caller.clone(),
+            beneficiary.clone(),
+            token.clone(),
+            amount,
+            nonce.clone(),
+        )
+            .into_val(&env); // Aquí sí usamos &env para into_val
+
+        env.crypto().sha256(&data).into()
+    }
+
+    /// --- DEPÓSITO ---
+    /// Un usuario deposita tokens en el contrato para un beneficiario.
     pub fn deposit(
         env: Env,
+        caller: Address,
         beneficiary: Address,
         token: Address,
         amount: i128,
         nonce: BytesN<32>,
     ) {
-        // CORRECCIÓN 1: Usar require_auth() para obtener y autorizar al depositante.
-        let depositor: Address = env.get_invoker();
-        depositor.require_auth();
-
+        caller.require_auth();
         if amount <= 0 {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        if beneficiary == depositor {
+        if beneficiary == caller {
             panic_with_error!(&env, Error::InvalidBeneficiary);
         }
 
-        let deposit_id: BytesN<32> = env
-            .crypto()
-            .sha256(
-                &(
-                    depositor.clone(),
-                    beneficiary.clone(),
-                    token.clone(),
-                    amount,
-                    nonce,
-                )
-                    .into_val(&env),
-            )
-            .into(); // No olvides el .into() que corregimos antes
+        let deposit_id = generate_deposit_id(
+            &env,
+            caller.clone(),
+            beneficiary.clone(),
+            token.clone(),
+            amount,
+            nonce.clone(),
+        );
 
         let mut deposits = env
             .storage()
             .persistent()
-            .get::<_, soroban_sdk::Map<BytesN<32>, Deposit>>(&DEPOSITS)
-            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+            .get::<_, Map<BytesN<32>, Deposit>>(&DEPOSITS)
+            .unwrap_or_else(|| Map::new(&env));
 
         if deposits.contains_key(deposit_id.clone()) {
             panic_with_error!(&env, Error::DepositExists);
         }
 
         let deposit_data = Deposit {
-            depositor: depositor.clone(),
+            depositor: caller.clone(),
             beneficiary: beneficiary.clone(),
             token: token.clone(),
             amount,
@@ -105,11 +121,16 @@ impl SecureEscrow {
         deposits.set(deposit_id.clone(), deposit_data);
         env.storage().persistent().set(&DEPOSITS, &deposits);
 
-        // CORRECCIÓN 2: Asegúrate de que token_client se define aquí
-        // y de que transfer_from tiene 4 argumentos.
         let token_client = token::Client::new(&env, &token);
         let contract_address = env.current_contract_address();
-        token_client.transfer_from(&contract_address, &depositor, &contract_address, &amount);
+
+        // CORRECCIÓN 2: La función `transfer` en esta versión del SDK espera `MuxedAddress`.
+        // Se debe realizar la conversión de `Address` a `MuxedAddress` con `.into()`.
+        token_client.transfer(
+            &depositor.clone().into(),
+            &contract_address.clone().into(),
+            &amount,
+        );
 
         env.events().publish(
             (symbol_short!("deposit"), depositor, beneficiary),
@@ -117,19 +138,20 @@ impl SecureEscrow {
         );
     }
 
-    /// Liberar fondos al beneficiario. Solo el owner puede hacerlo.
+    /// --- LIBERACIÓN DE FONDOS ---
+    /// El propietario del contrato libera los fondos al beneficiario.
     pub fn release_funds(env: Env, deposit_id: BytesN<32>) {
         let owner: Address = env
             .storage()
             .instance()
             .get(&OWNER)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        owner.require_auth(); // Solo el owner puede liberar.
+        owner.require_auth();
 
         let mut deposits = env
             .storage()
             .persistent()
-            .get::<_, soroban_sdk::Map<BytesN<32>, Deposit>>(&DEPOSITS)
+            .get::<_, Map<BytesN<32>, Deposit>>(&DEPOSITS)
             .unwrap_or_else(|| panic_with_error!(&env, Error::DepositNotFound));
 
         let mut deposit = deposits
@@ -140,16 +162,16 @@ impl SecureEscrow {
             panic_with_error!(&env, Error::AlreadyReleased);
         }
 
-        // Marcar como liberado y actualizar el estado
         deposit.released = true;
         deposits.set(deposit_id.clone(), deposit.clone());
         env.storage().persistent().set(&DEPOSITS, &deposits);
 
-        // Transferir los fondos al beneficiario
         let token_client = token::Client::new(&env, &deposit.token);
+
+        // CORRECCIÓN 3: Convertir los `Address` a `MuxedAddress` para la función `transfer`.
         token_client.transfer(
-            &env.current_contract_address(),
-            &deposit.beneficiary,
+            &env.current_contract_address().clone().into(),
+            &deposit.beneficiary.clone().into(),
             &deposit.amount,
         );
 
@@ -159,35 +181,35 @@ impl SecureEscrow {
         );
     }
 
-    /// Reembolsar fondos al depositante si no han sido liberados.
+    /// --- REEMBOLSO ---
+    /// El depositante original solicita un reembolso.
     pub fn refund(env: Env, deposit_id: BytesN<32>) {
         let mut deposits = env
             .storage()
             .persistent()
-            .get::<_, soroban_sdk::Map<BytesN<32>, Deposit>>(&DEPOSITS)
+            .get::<_, Map<BytesN<32>, Deposit>>(&DEPOSITS)
             .unwrap_or_else(|| panic_with_error!(&env, Error::DepositNotFound));
 
         let mut deposit = deposits
             .get(deposit_id.clone())
             .unwrap_or_else(|| panic_with_error!(&env, Error::DepositNotFound));
 
-        // CORRECCIÓN: Solo el depositante puede pedir el reembolso.
         deposit.depositor.require_auth();
 
         if deposit.released {
             panic_with_error!(&env, Error::AlreadyReleased);
         }
 
-        // Marcar como liberado (para evitar doble gasto) y actualizar
         deposit.released = true;
         deposits.set(deposit_id.clone(), deposit.clone());
         env.storage().persistent().set(&DEPOSITS, &deposits);
 
-        // Devolver los fondos al depositante
         let token_client = token::Client::new(&env, &deposit.token);
+
+        // CORRECCIÓN 4: Convertir los `Address` a `MuxedAddress` para la función `transfer`.
         token_client.transfer(
-            &env.current_contract_address(),
-            &deposit.depositor,
+            &env.current_contract_address().clone().into(),
+            &deposit.depositor.clone().into(),
             &deposit.amount,
         );
 

@@ -9,8 +9,7 @@ crate-type = ["lib", "cdylib"]
 doctest = false
 
 [dependencies]
-soroban-env-common = "22.1.4"
-soroban-sdk = { version = "22.0.8", features = ["alloc"], workspace = true }
+soroban-sdk = { version = "23.0.0-rc.2", features = ["alloc"] }
 
 [dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-sdk = { version = "23.0.0-rc.2", features = ["testutils"] }
